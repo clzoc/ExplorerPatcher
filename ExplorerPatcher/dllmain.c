@@ -104,6 +104,7 @@ DWORD bShowUpdateToast = FALSE;
 DWORD bToolbarSeparators = FALSE;
 DWORD bTaskbarAutohideOnDoubleClick = FALSE;
 DWORD dwOrbStyle = 0;
+DWORD dwClockButtonStyle = 0;
 DWORD bEnableSymbolDownload = TRUE;
 DWORD dwAltTabSettings = 0;
 DWORD bDisableAeroSnapQuadrants = FALSE;
@@ -163,6 +164,9 @@ int (*SHWindowsPolicy)(REFIID);
 #define ORB_STYLE_WINDOWS10 0
 #define ORB_STYLE_WINDOWS11 1
 #define ORB_STYLE_TRANSPARENT 2
+#define CLOCK_BUTTON_STYLE_WINDOWS10 0
+#define CLOCK_BUTTON_STYLE_WINDOWS11 1
+HWND hClockButtonPaintContext = NULL;
 typedef struct _OrbInfo
 {
     HTHEME hTheme;
@@ -2361,6 +2365,209 @@ BOOL ShowLegacyClockExperience(HWND hWnd)
     return TRUE;
 }
 
+BOOL IsClockButtonWindow(HWND hWnd)
+{
+    WCHAR wszClassName[64];
+    ZeroMemory(wszClassName, sizeof(wszClassName));
+    GetClassNameW(hWnd, wszClassName, ARRAYSIZE(wszClassName));
+    return !wcscmp(wszClassName, L"TrayClockWClass") || !wcscmp(wszClassName, L"ClockButton");
+}
+
+BOOL IsTaskbarClockButtonWindow(HWND hWnd)
+{
+    if (!hWnd || !IsClockButtonWindow(hWnd))
+    {
+        return FALSE;
+    }
+
+    HWND hRoot = GetAncestor(hWnd, GA_ROOT);
+    WCHAR wszRootClassName[64];
+    ZeroMemory(wszRootClassName, sizeof(wszRootClassName));
+    GetClassNameW(hRoot, wszRootClassName, ARRAYSIZE(wszRootClassName));
+    return !wcscmp(wszRootClassName, L"Shell_TrayWnd") || !wcscmp(wszRootClassName, L"Shell_SecondaryTrayWnd");
+}
+
+BOOL ShouldUseWin11ClockButtonStyle(HWND hWnd)
+{
+    return bOldTaskbar && dwClockButtonStyle == CLOCK_BUTTON_STYLE_WINDOWS11 && IsTaskbarClockButtonWindow(hWnd);
+}
+
+BOOL IsClockButtonThemePart(int iPartId)
+{
+    return iPartId == 5;
+}
+
+BOOL ShouldUseDarkClockButtonColors()
+{
+    if (IsHighContrast())
+    {
+        return FALSE;
+    }
+    if (ShouldSystemUseDarkMode)
+    {
+        return ShouldSystemUseDarkMode();
+    }
+    if (ShouldAppsUseDarkMode)
+    {
+        return ShouldAppsUseDarkMode();
+    }
+    return IsWindows11();
+}
+
+COLORREF GetWin11ClockButtonColor(HWND hWnd)
+{
+    if (IsHighContrast())
+    {
+        if (GetPropW(hWnd, L"EP_ClockButtonPressed"))
+        {
+            return GetSysColor(COLOR_HIGHLIGHT);
+        }
+        if (GetPropW(hWnd, L"EP_ClockButtonHot"))
+        {
+            return GetSysColor(COLOR_3DLIGHT);
+        }
+        return CLR_INVALID;
+    }
+
+    BOOL bDark = ShouldUseDarkClockButtonColors();
+    if (GetPropW(hWnd, L"EP_ClockButtonPressed"))
+    {
+        return bDark ? RGB(255, 255, 255) : RGB(0, 0, 0);
+    }
+    if (GetPropW(hWnd, L"EP_ClockButtonHot"))
+    {
+        return bDark ? RGB(255, 255, 255) : RGB(0, 0, 0);
+    }
+    return CLR_INVALID;
+}
+
+BYTE GetWin11ClockButtonAlpha(HWND hWnd)
+{
+    if (IsHighContrast())
+    {
+        return (GetPropW(hWnd, L"EP_ClockButtonPressed") || GetPropW(hWnd, L"EP_ClockButtonHot")) ? 0xFF : 0;
+    }
+    if (GetPropW(hWnd, L"EP_ClockButtonPressed"))
+    {
+        return ShouldUseDarkClockButtonColors() ? 0x18 : 0x0F;
+    }
+    if (GetPropW(hWnd, L"EP_ClockButtonHot"))
+    {
+        return ShouldUseDarkClockButtonColors() ? 0x1A : 0x0A;
+    }
+    return 0;
+}
+
+void DrawWin11ClockButtonBackground(HWND hWnd, HDC hdc, LPCRECT pRect)
+{
+    DrawThemeParentBackground(hWnd, hdc, pRect);
+    if (!pRect)
+    {
+        return;
+    }
+
+    COLORREF cr = GetWin11ClockButtonColor(hWnd);
+    BYTE bAlpha = GetWin11ClockButtonAlpha(hWnd);
+    if (cr == CLR_INVALID || !bAlpha)
+    {
+        return;
+    }
+
+    RECT rc = *pRect;
+    UINT dpi = GetDpiForWindow(hWnd);
+    InflateRect(&rc, -MulDiv(2, dpi, 96), -MulDiv(3, dpi, 96));
+    int cx = rc.right - rc.left;
+    int cy = rc.bottom - rc.top;
+    if (cx <= 0 || cy <= 0)
+    {
+        return;
+    }
+
+    HDC hdcMem = CreateCompatibleDC(hdc);
+    if (!hdcMem)
+    {
+        return;
+    }
+    HBITMAP hBitmap = CreateCompatibleBitmap(hdc, cx, cy);
+    if (!hBitmap)
+    {
+        DeleteDC(hdcMem);
+        return;
+    }
+
+    HGDIOBJ hOldBitmap = SelectObject(hdcMem, hBitmap);
+    RECT rcMem = { 0, 0, cx, cy };
+    HBRUSH hBrush = CreateSolidBrush(cr);
+    if (hBrush)
+    {
+        FillRect(hdcMem, &rcMem, hBrush);
+    }
+
+    HRGN hRgn = CreateRoundRectRgn(
+        rc.left,
+        rc.top,
+        rc.right + 1,
+        rc.bottom + 1,
+        MulDiv(8, dpi, 96),
+        MulDiv(8, dpi, 96)
+    );
+    if (hRgn && hBrush)
+    {
+        int iSavedDC = SaveDC(hdc);
+        if (iSavedDC)
+        {
+            SelectClipRgn(hdc, hRgn);
+            BLENDFUNCTION bf = { AC_SRC_OVER, 0, bAlpha, 0 };
+            GdiAlphaBlend(hdc, rc.left, rc.top, cx, cy, hdcMem, 0, 0, cx, cy, bf);
+            RestoreDC(hdc, iSavedDC);
+        }
+    }
+
+    if (hRgn)
+    {
+        DeleteObject(hRgn);
+    }
+    if (hBrush)
+    {
+        DeleteObject(hBrush);
+    }
+    SelectObject(hdcMem, hOldBitmap);
+    DeleteObject(hBitmap);
+    DeleteDC(hdcMem);
+}
+
+void InvalidateClockButton(HWND hWnd)
+{
+    if (hWnd)
+    {
+        InvalidateRect(hWnd, NULL, TRUE);
+        UpdateWindow(hWnd);
+    }
+}
+
+void InvalidateClockButtons()
+{
+    HWND hShellTray_Wnd = FindWindowExW(NULL, NULL, L"Shell_TrayWnd", NULL);
+    if (hShellTray_Wnd)
+    {
+        HWND hTrayNotifyWnd = FindWindowExW(hShellTray_Wnd, NULL, L"TrayNotifyWnd", NULL);
+        if (hTrayNotifyWnd)
+        {
+            InvalidateClockButton(FindWindowExW(hTrayNotifyWnd, NULL, L"TrayClockWClass", NULL));
+        }
+    }
+
+    HWND hWnd = NULL;
+    do
+    {
+        hWnd = FindWindowExW(NULL, hWnd, L"Shell_SecondaryTrayWnd", NULL);
+        if (hWnd)
+        {
+            InvalidateClockButton(FindWindowExW(hWnd, NULL, L"ClockButton", NULL));
+        }
+    } while (hWnd);
+}
+
 INT64 ClockButtonSubclassProc(
     _In_ HWND   hWnd,
     _In_ UINT   uMsg,
@@ -2372,9 +2579,73 @@ INT64 ClockButtonSubclassProc(
 {
     if (uMsg == WM_NCDESTROY)
     {
+        RemovePropW(hWnd, L"EP_ClockButtonTracking");
+        RemovePropW(hWnd, L"EP_ClockButtonHot");
+        RemovePropW(hWnd, L"EP_ClockButtonPressed");
         RemoveWindowSubclass(hWnd, ClockButtonSubclassProc, ClockButtonSubclassProc);
     }
-    else if (uMsg == WM_LBUTTONDOWN || (uMsg == WM_KEYDOWN && wParam == VK_RETURN))
+    else if (ShouldUseWin11ClockButtonStyle(hWnd))
+    {
+        if (uMsg == WM_PAINT || uMsg == WM_PRINTCLIENT)
+        {
+            HWND hPreviousClockButtonPaintContext = hClockButtonPaintContext;
+            hClockButtonPaintContext = hWnd;
+            INT64 result = DefSubclassProc(hWnd, uMsg, wParam, lParam);
+            hClockButtonPaintContext = hPreviousClockButtonPaintContext;
+            return result;
+        }
+        else if (uMsg == WM_ERASEBKGND)
+        {
+            DrawThemeParentBackground(hWnd, (HDC)wParam, NULL);
+            return 1;
+        }
+        else if (uMsg == WM_MOUSEMOVE)
+        {
+            if (!GetPropW(hWnd, L"EP_ClockButtonTracking"))
+            {
+                TRACKMOUSEEVENT tme;
+                ZeroMemory(&tme, sizeof(TRACKMOUSEEVENT));
+                tme.cbSize = sizeof(TRACKMOUSEEVENT);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hWnd;
+                if (TrackMouseEvent(&tme))
+                {
+                    SetPropW(hWnd, L"EP_ClockButtonTracking", (HANDLE)TRUE);
+                }
+            }
+            if (!GetPropW(hWnd, L"EP_ClockButtonHot"))
+            {
+                SetPropW(hWnd, L"EP_ClockButtonHot", (HANDLE)TRUE);
+                InvalidateClockButton(hWnd);
+            }
+        }
+        else if (uMsg == WM_MOUSELEAVE)
+        {
+            RemovePropW(hWnd, L"EP_ClockButtonTracking");
+            RemovePropW(hWnd, L"EP_ClockButtonHot");
+            RemovePropW(hWnd, L"EP_ClockButtonPressed");
+            InvalidateClockButton(hWnd);
+        }
+        else if (uMsg == WM_LBUTTONDOWN)
+        {
+            SetPropW(hWnd, L"EP_ClockButtonPressed", (HANDLE)TRUE);
+            InvalidateClockButton(hWnd);
+        }
+        else if (uMsg == WM_LBUTTONUP || uMsg == WM_CAPTURECHANGED || uMsg == WM_CANCELMODE || uMsg == WM_KILLFOCUS)
+        {
+            if (GetPropW(hWnd, L"EP_ClockButtonPressed"))
+            {
+                RemovePropW(hWnd, L"EP_ClockButtonPressed");
+                InvalidateClockButton(hWnd);
+            }
+        }
+        else if (uMsg == WM_THEMECHANGED || uMsg == WM_SETTINGCHANGE)
+        {
+            InvalidateClockButton(hWnd);
+        }
+    }
+
+    if (uMsg == WM_LBUTTONDOWN || (uMsg == WM_KEYDOWN && wParam == VK_RETURN))
     {
         if (ShouldShowLegacyClockExperience() == 1)
         {
@@ -5640,13 +5911,14 @@ DWORD WindowSwitcher(DWORD unused)
 
 
 #pragma region "Load Settings from registry"
-#define REFRESHUI_NONE         0b000000
-#define REFRESHUI_GLOM         0b000001
-#define REFRESHUI_ORB          0b000010
-#define REFRESHUI_PEOPLE       0b000100
-#define REFRESHUI_TASKBAR      0b001000
-#define REFRESHUI_CENTER       0b010000
-#define REFRESHUI_SPOTLIGHT    0b100000
+#define REFRESHUI_NONE         0b0000000
+#define REFRESHUI_GLOM         0b0000001
+#define REFRESHUI_ORB          0b0000010
+#define REFRESHUI_PEOPLE       0b0000100
+#define REFRESHUI_TASKBAR      0b0001000
+#define REFRESHUI_CENTER       0b0010000
+#define REFRESHUI_SPOTLIGHT    0b0100000
+#define REFRESHUI_CLOCK        0b1000000
 void WINAPI LoadSettings(LPARAM lParam)
 {
     BOOL bIsExplorer = LOWORD(lParam);
@@ -6186,6 +6458,25 @@ void WINAPI LoadSettings(LPARAM lParam)
         {
             dwOrbStyle = dwTemp;
             dwRefreshUIMask |= REFRESHUI_ORB;
+        }
+        dwTemp = CLOCK_BUTTON_STYLE_WINDOWS10;
+        dwSize = sizeof(DWORD);
+        RegQueryValueExW(
+            hKey,
+            TEXT("ClockButtonStyle"),
+            0,
+            NULL,
+            &dwTemp,
+            &dwSize
+        );
+        if (dwTemp > CLOCK_BUTTON_STYLE_WINDOWS11)
+        {
+            dwTemp = CLOCK_BUTTON_STYLE_WINDOWS10;
+        }
+        if (bOldTaskbar && (dwTemp != dwClockButtonStyle))
+        {
+            dwClockButtonStyle = dwTemp;
+            dwRefreshUIMask |= REFRESHUI_CLOCK;
         }
         dwSize = sizeof(DWORD);
         RegQueryValueExW(
@@ -6846,6 +7137,12 @@ void WINAPI LoadSettings(LPARAM lParam)
             FixUpCenteredTaskbar();
 #endif
         }
+        if (dwRefreshUIMask & REFRESHUI_CLOCK)
+        {
+#if WITH_MAIN_PATCHER
+            InvalidateClockButtons();
+#endif
+        }
         if (dwRefreshUIMask & REFRESHUI_SPOTLIGHT)
         {
             DWORD dwAttributes = 0; dwTemp = sizeof(DWORD);
@@ -7311,6 +7608,13 @@ HRESULT explorer_DrawThemeBackground(
     LPCRECT pClipRect
 )
 {
+    HWND hWnd = hClockButtonPaintContext ? hClockButtonPaintContext : WindowFromDC(hdc);
+    if (ShouldUseWin11ClockButtonStyle(hWnd) && IsClockButtonThemePart(iPartId))
+    {
+        DrawWin11ClockButtonBackground(hWnd, hdc, pRect);
+        return S_OK;
+    }
+
     if (dwOrbStyle && hOrbCollection)
     {
         for (unsigned int i = 0; i < DPA_GetPtrCount(hOrbCollection); ++i)

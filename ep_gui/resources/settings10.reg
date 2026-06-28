@@ -135,6 +135,13 @@
 ;x 1 %R:1131%
 ;x 2 %R:1132%
 "UseWin32TrayClockExperience"=dword:00000000
+[HKEY_CURRENT_USER\Software\ExplorerPatcher]
+;s ClockButtonStyleSection IsOldTaskbar
+;c 2 %R:1146%
+;x 0 %R:1147%
+;x 1 %R:1148%
+"ClockButtonStyle"=dword:00000000
+;g ClockButtonStyleSection
 [HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\ImmersiveShell]
 ;c 2 %R:1133%
 ;x 0 %R:1134%
