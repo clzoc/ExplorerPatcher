@@ -8,6 +8,10 @@ name: Build
 
 on:
   push:
+    branches:
+      - '**'
+    tags:
+      - '**'
   pull_request:
   workflow_dispatch:
     inputs:
@@ -16,6 +20,9 @@ on:
         required: true
       config:
         description: 'Configuration'
+        required: false
+      release_tag:
+        description: 'Release tag'
         required: false
 
 env:
@@ -61,7 +68,22 @@ jobs:
         id: vars
         shell: bash
         run: |
-          echo "sha_short=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "release_ref_type=tag" >> $GITHUB_OUTPUT
+            echo "release_ref_name=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && -n "${GITHUB_EVENT_INPUTS_RELEASE_TAG}" ]]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "release_ref_type=tag" >> $GITHUB_OUTPUT
+            echo "release_ref_name=${GITHUB_EVENT_INPUTS_RELEASE_TAG}" >> $GITHUB_OUTPUT
+          else
+            echo "should_release=false" >> $GITHUB_OUTPUT
+            echo "release_ref_type=${GITHUB_REF_TYPE}" >> $GITHUB_OUTPUT
+            echo "release_ref_name=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GITHUB_EVENT_INPUTS_RELEASE_TAG: ${{ github.event.inputs.release_tag }}
 
       - name: Enable SimpleWindowSwitcher support for newer Windows SDKs
         shell: cmd
@@ -168,7 +190,7 @@ jobs:
       # build/Release/x64/ep_setup.exe -> build/Release/ep_setup.exe
       # build/Release/ARM64/ep_setup.exe -> build/Release/ep_setup_arm64.exe
       - name: Stage files for release
-        if: github.event_name == 'push' && github.ref_type == 'tag'
+        if: steps.vars.outputs.should_release == 'true'
         shell: bash
         run: |
           if [ -d "build/Release/x64" ] && ls build/Release/x64/ep_setup.exe 1> /dev/null 2>&1; then
@@ -181,7 +203,7 @@ jobs:
       - name: Generate release name
         shell: bash
         working-directory: build/Release/x64
-        if: github.event_name == 'push' && github.ref_type == 'tag'
+        if: steps.vars.outputs.should_release == 'true'
         run: |
           echo "data=$(./ep_generate_release_name.exe)" >> $GITHUB_OUTPUT
         id: release_name
@@ -189,10 +211,10 @@ jobs:
       - name: Generate release notes
         shell: bash
         working-directory: build/Release/x64
-        if: github.event_name == 'push' && github.ref_type == 'tag'
+        if: steps.vars.outputs.should_release == 'true'
         run: |
           echo "data<<EP_RELEASE_DESCRIPTION_DELIM" >> $GITHUB_OUTPUT
-          echo "$(./ep_generate_release_description.exe ${STEPS_VARS_OUTPUTS_SHA_SHORT} ${{ github.ref_type }} ${{ github.ref_name }} ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_OUTPUT
+          echo "$(./ep_generate_release_description.exe ${STEPS_VARS_OUTPUTS_SHA_SHORT} ${{ steps.vars.outputs.release_ref_type }} ${{ steps.vars.outputs.release_ref_name }} ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_OUTPUT
           echo "EP_RELEASE_DESCRIPTION_DELIM" >> $GITHUB_OUTPUT
         id: release_description
         env:
@@ -215,13 +237,13 @@ jobs:
 
       - name: Create/update release (forks)
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
-        if: github.repository_owner != 'valinet' && github.event_name == 'push' && github.ref_type == 'tag'
+        if: github.repository_owner != 'valinet' && steps.vars.outputs.should_release == 'true'
         id: create_release_fork
         with:
           draft: false
-          prerelease: ${{ !startsWith(github.event.head_commit.message, 'rel_') }}
+          prerelease: true
           name: ${{ steps.release_name.outputs.data }}
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ steps.vars.outputs.release_ref_name }}
           body: ${{ steps.release_description.outputs.data }}
           files: |
             build/Release/ep_setup.exe
